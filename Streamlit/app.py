@@ -23,10 +23,37 @@ st.set_page_config(page_title="Deepfake Audio Detection",page_icon="")
 class_names = ['real','fake']
 
 def save_file(sound_file):
-    # save your sound file in the right folder by following the path
-    with open(os.path.join('audio_files/', sound_file.name),'wb') as f:
-         f.write(sound_file.getbuffer())
-    return sound_file.name
+    # Save the uploaded sound file to three locations:
+    # 1) local Streamlit/audio_files (used by this app)
+    # 2) Code/Deepfake_Audio/audio_files (project code folder)
+    # 3) img/Deepfake_Audio/audio_files (image assets folder)
+    filename = sound_file.name
+    streamlit_dir = os.path.dirname(__file__)
+    project_root = os.path.dirname(streamlit_dir)
+
+    target_dirs = [
+        os.path.join(streamlit_dir, 'audio_files'),
+        os.path.join(project_root, 'Code', 'Deepfake_Audio', 'audio_files'),
+        os.path.join(project_root, 'img', 'Deepfake_Audio', 'audio_files'),
+    ]
+
+    # Read data once (handle UploadedFile API differences)
+    if hasattr(sound_file, 'getbuffer'):
+        data = sound_file.getbuffer()
+    else:
+        try:
+            sound_file.seek(0)
+        except Exception:
+            pass
+        data = sound_file.read()
+
+    for d in target_dirs:
+        os.makedirs(d, exist_ok=True)
+        target_path = os.path.join(d, filename)
+        with open(target_path, 'wb') as f:
+            f.write(data)
+
+    return filename
 
 def create_spectrogram(sound):
     audio_file = os.path.join('audio_files/', sound)
@@ -46,38 +73,28 @@ def create_spectrogram(sound):
     st.image(image_data)
     return(image_data)
 
-def predictions(image_data,model):
-  
-#   model.summary(print_fn=lambda x: st.text(x))
-
-#   img_array = img_to_array(image_data)
-#   img_batch = np.expand_dims(img_array, axis=0)
-
-#   img_preprocessed = preprocess_input(img_batch)
-#   prediction = model.predict(img_preprocessed)
-
-#   class_label = np.argmax(prediction)
+def predictions(image_data, model):
     img_array = np.array(image_data)
-    img_array1 = img_array / 255
+    img_array1 = img_array / 255.0
+    img_array1 = img_array1.astype(np.float32)  # Ensure float32 for SavedModel
     img_batch = np.expand_dims(img_array1, axis=0)
 
-    # img_preprocessed = preprocess_input(img_batch)
-    prediction = model.predict(img_batch)
+    prediction = model(img_batch, training=False)
     class_label = np.argmax(prediction)
-    return class_label,prediction
+    return class_label, prediction
 
 def lime_predict(image_data,model):
     img_array = np.array(image_data)
-    img_array1 = img_array / 255
+    img_array1 = img_array / 255.0
+    img_array1 = img_array1.astype(np.float32)  # Ensure float32 for SavedModel
     img_batch = np.expand_dims(img_array1, axis=0)
 
-    # img_preprocessed = preprocess_input(img_batch)
-    prediction = model.predict(img_batch)
+    prediction = model(img_batch, training=False)
     class_label = np.argmax(prediction)
 
     explainer = lime.lime_image.LimeImageExplainer()
     # explanation = explainer.explain_instance(img_array.astype('float64'), model.predict, hide_color=0, num_samples=1000)
-    explanation = explainer.explain_instance(img_array1.astype('float64'), model.predict, hide_color=0, num_samples=1000)
+    explanation = explainer.explain_instance(img_array1.astype('float32'), lambda x: model(x, training=False).numpy(), hide_color=0, num_samples=1000)
     
     fig, axs = plt.subplots(1, 2, figsize=(10, 25))
     for i in range(2):
@@ -97,6 +114,8 @@ def grad_predict(image_data,model_mob,preds,class_idx):
     # img_array1 = img_array / 255
     x = np.expand_dims(img_array,axis=0)
     x = tf.keras.applications.vgg16.preprocess_input(x)
+    
+    # Note: grad_predict uses a separate VGG16 model, not the loaded SavedModel
 
     model = tf.keras.applications.VGG16(weights='imagenet', include_top=True)
     last_conv_layer = model.get_layer('block5_conv3')
@@ -174,7 +193,8 @@ def homepage():
         sound = uploaded_file.name
         with st.spinner('Fetching Results...'):
             spec = create_spectrogram(sound)
-            model = tf.keras.models.load_model('saved_model/model')
+            # Load SavedModel using tf.saved_model.load (Keras 3 compatible)
+            model = tf.saved_model.load('saved_model/model')
         st.write('### Classification results:')
         class_label,prediction = predictions(spec,model)
         st.write("#### The uploaded audio file is "+class_names[class_label])
