@@ -3,10 +3,10 @@ Example usage of Lung Cancer Detection with XAI
 """
 
 import torch
-from lung_cancer_models import LungCancerClassifier
-from gradcam_implementation import apply_gradcam
-from lime_image_explainer import apply_lime_image
-from shap_image_explainer import apply_shap_image
+from Lung_Cancer_Model import LungCancerClassifier
+from gradcam import apply_gradcam
+from lime_explainer import apply_lime_image
+from shap import apply_shap_image
 
 # Check for GPU
 device = 'cuda' if torch.cuda.is_available() else 'cpu'

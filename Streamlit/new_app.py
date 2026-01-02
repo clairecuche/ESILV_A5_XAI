@@ -25,8 +25,6 @@ st.set_page_config(
     page_icon=""
 )
 
-class_names_audio = ['real','fake']
-class_names_image = ['benign','malignant']
 
 # ============================================
 # COMPATIBILITY SYSTEM (NEW)
@@ -54,7 +52,7 @@ class XAICompatibility:
         return []
 
 # ============================================
-# AUDIO FUNCTIONS (ORIGINAL CODE PRESERVED)
+# AUDIO FUNCTIONS 
 # ============================================
 
 audio_class_names = ['real', 'fake']
@@ -198,7 +196,7 @@ def grad_predict(image_data, model_mob, preds, class_idx):
     return(fig1)
 
 # ============================================
-# IMAGE FUNCTIONS (NEW - FOR LUNG CANCER)
+# IMAGE FUNCTIONS 
 # ============================================
 
 image_class_names = ['Benign', 'Malignant']
