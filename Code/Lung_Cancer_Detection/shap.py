@@ -45,12 +45,7 @@ class ImageSHAPExplainer:
     
     def explain(self, image_path, num_samples=100):
         """
-        Generate SHAP explanation for image
-        Args:
-            image_path: Path to image or PIL Image
-            num_samples: Number of samples for SHAP approximation
-        Returns:
-            SHAP values and visualization data
+        Generate SHAP explanation using GradientExplainer (plus stable)
         """
         # Load and preprocess image
         if isinstance(image_path, str):
@@ -62,11 +57,10 @@ class ImageSHAPExplainer:
         
         # Create background if not set
         if self.background is None:
-            # Use the test image itself as background (simplified)
             self.background = image_tensor
         
-        # Initialize DeepExplainer
-        explainer = shap.DeepExplainer(self.model, self.background)
+        # Utiliser GradientExplainer (plus compatible)
+        explainer = shap.GradientExplainer(self.model, self.background)
         
         # Calculate SHAP values
         shap_values = explainer.shap_values(image_tensor)
