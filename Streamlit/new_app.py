@@ -218,7 +218,8 @@ def load_and_preprocess_image(image_path, target_size=(224, 224)):
     if isinstance(image_path, str):
         image = Image.open(image_path).convert('RGB')
     else:
-        image = image_path.convert('RGB')
+        # Handle Streamlit UploadedFile object
+        image = Image.open(image_path).convert('RGB')
     image = image.resize(target_size)
     return image
 
