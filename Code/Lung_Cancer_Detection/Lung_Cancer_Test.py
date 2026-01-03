@@ -23,7 +23,7 @@ print(f"Model loaded: {classifier.model_name}")
 # 2. MAKE PREDICTION
 # ============================================
 print("\n2. Making prediction...")
-image_path = "path/to/chest_xray.jpg"  # Replace with your image
+image_path = "../../img/Lung_Cancer/image3.png"  # Replace with your image
 
 result = classifier.predict(image_path)
 print(f"Prediction: {result['prediction']}")
