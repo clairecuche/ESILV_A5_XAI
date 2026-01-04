@@ -58,10 +58,9 @@ class XAICompatibility:
     def get_available_xai_methods(input_type):
         """Return compatible XAI methods for input type"""
         if input_type == "audio":
-            return ["LIME", "Grad-CAM"]
+            return ["LIME", "Grad-CAM", "SHAP"]
         elif input_type == "image":
-            # SHAP temporairement désactivé jusqu'à implémentation
-            return ["LIME", "Grad-CAM"]  # "SHAP" sera ajouté plus tard
+            return ["LIME", "Grad-CAM", "SHAP"]  
         return []
     
     @staticmethod
@@ -88,12 +87,6 @@ def save_file(sound_file):
     # Primary location: project root audio_files (as requested)
     primary_dir = os.path.join(project_root, 'audio_files')
 
-    # Optional backup locations to keep compatibility with notebooks and img assets
-    backup_dirs = [
-        os.path.join(project_root, 'Code', 'Deepfake_Audio', 'audio_files'),
-        os.path.join(project_root, 'img', 'Deepfake_Audio', 'audio_files'),
-    ]
-
     if hasattr(sound_file, 'getbuffer'):
         data = sound_file.getbuffer()
     else:
@@ -108,17 +101,6 @@ def save_file(sound_file):
     primary_path = os.path.join(primary_dir, filename)
     with open(primary_path, 'wb') as f:
         f.write(data)
-
-    # Also save to backups (best-effort)
-    for d in backup_dirs:
-        try:
-            os.makedirs(d, exist_ok=True)
-            target_path = os.path.join(d, filename)
-            with open(target_path, 'wb') as f:
-                f.write(data)
-        except Exception:
-            # ignore backup failures
-            pass
 
     # Return the filename (and primary path if needed later)
     return filename
