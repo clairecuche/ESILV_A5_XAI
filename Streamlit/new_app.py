@@ -24,10 +24,15 @@ import uuid
 from pathlib import Path
 
 # Ensure project Code/ modules are importable when running from Streamlit folder
-project_root = os.path.dirname(os.path.dirname(__file__))
-code_path = os.path.join(project_root, 'Code', 'Lung_Cancer_Detection')
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+code_path = os.path.abspath(os.path.join(project_root, 'Code', 'Lung_Cancer_Detection'))
+
 if code_path not in sys.path:
     sys.path.insert(0, code_path)
+
+print(f"🔍 Project root: {project_root}")
+print(f"🔍 Code path: {code_path}")
+print(f"🔍 Path exists: {os.path.exists(code_path)}")
 
 # Import Lung Cancer modules (PyTorch) if available
 try:
@@ -35,9 +40,12 @@ try:
     from gradcam import apply_gradcam
     # Note: lime_explainer et shap ne sont pas encore implémentés, on les fera après
     LUNG_CANCER_AVAILABLE = True
+    print("✅ Lung Cancer modules imported successfully")
 except Exception as e:
     LUNG_CANCER_AVAILABLE = False
     print(f"❌ Failed to import Lung Cancer modules: {e}")
+    import traceback
+    traceback.print_exc()
 
 # Page configuration
 st.set_page_config(
@@ -468,9 +476,18 @@ def classification_page():
     
     if uploaded_file is not None:
         available_xai = XAICompatibility.get_available_xai_methods(input_mode)
+        available_models = XAICompatibility.get_available_models(input_mode)
         
         st.subheader("⚙️ Configuration")
-              
+        
+        # Model selection (for images)
+        if input_mode == "image":
+            selected_model = st.selectbox(
+                "Select Model",
+                available_models,
+                help=f"Models available for {input_mode}"
+            )
+        
         selected_xai = st.selectbox(
             "Select XAI Method",
             available_xai,
@@ -492,7 +509,7 @@ def classification_page():
             with st.spinner('Generating spectrogram...'):
                 spec = create_spectrogram(sound)
                 st.image(spec, width=700)
-                model = tf.saved_model.load('saved_model/model')
+                model = tf.saved_model.load('../saved_model/model')
             
             st.write('### Classification results:')
             class_label, prediction = predictions(spec, model)
@@ -615,7 +632,7 @@ def comparison_page():
             if input_mode == "audio":
                 with st.spinner('Generating spectrogram...'):
                     spec = create_spectrogram(sound)
-                    model = tf.saved_model.load('saved_model/model')
+                    model = tf.saved_model.load('../saved_model/model')
                     class_label, prediction = predictions(spec, model)
                 
                 for idx, method in enumerate(selected_methods):
