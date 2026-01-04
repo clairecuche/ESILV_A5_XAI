@@ -8,6 +8,7 @@ import numpy as np
 import shap
 from PIL import Image
 import matplotlib.pyplot as plt
+import cv2
 
 class ImageSHAPExplainer:
     def __init__(self, model, transform, classes, device='cpu'):
@@ -43,7 +44,7 @@ class ImageSHAPExplainer:
         
         self.background = torch.cat(background_tensors, dim=0).to(self.device)
     
-    def explain(self, image_path, num_samples=100):
+    def explain(self, image_path):
         """
         Generate SHAP explanation using GradientExplainer (plus stable)
         """
@@ -57,7 +58,7 @@ class ImageSHAPExplainer:
         
         # Create background if not set
         if self.background is None:
-            self.background = image_tensor
+            self.background = torch.zeros_like(image_tensor).to(self.device)
         
         # Utiliser GradientExplainer (plus compatible)
         explainer = shap.GradientExplainer(self.model, self.background)
@@ -119,17 +120,12 @@ class ImageSHAPExplainer:
         result = Image.open('/tmp/shap_viz.png')
         return result, shap_sum
     
+    
     def visualize_overlay(self, image_path, shap_values, predicted_class_idx=1):
         """
-        Create SHAP visualization overlaid on original image
-        Args:
-            image_path: Path to original image or PIL Image
-            shap_values: SHAP values
-            predicted_class_idx: Class index to visualize
-        Returns:
-            Overlaid visualization
+        Crée une visualisation SHAP superposée avec correction du type de données pour OpenCV
         """
-        # Load original image
+        # 1. Préparation de l'image originale
         if isinstance(image_path, str):
             original_image = Image.open(image_path).convert('RGB')
         else:
@@ -138,25 +134,39 @@ class ImageSHAPExplainer:
         original_image = original_image.resize((224, 224))
         original_array = np.array(original_image)
         
-        # Get SHAP heatmap
+        # 2. Extraction et nettoyage des dimensions SHAP
         if isinstance(shap_values, list):
             shap_values_class = shap_values[predicted_class_idx]
         else:
             shap_values_class = shap_values[predicted_class_idx]
-        
+
+        # Si SHAP renvoie (1, 3, 224, 224), on retire la dimension de batch
+        if len(shap_values_class.shape) == 4:
+            shap_values_class = shap_values_class[0]
+
+        # Conversion en numpy si c'est encore un tenseur PyTorch
+        if torch.is_tensor(shap_values_class):
+            shap_values_class = shap_values_class.detach().cpu().numpy()
+
+        # 3. Création de la heatmap 2D
+        # On somme les valeurs absolues des canaux (C, H, W) -> (H, W)
         shap_sum = np.sum(np.abs(shap_values_class), axis=0)
-        shap_sum = (shap_sum - shap_sum.min()) / (shap_sum.max() - shap_sum.min() + 1e-8)
         
-        # Create colored heatmap
-        import cv2
-        heatmap = cv2.applyColorMap(np.uint8(255 * shap_sum), cv2.COLORMAP_JET)
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        # Normalisation entre 0 et 1
+        shap_min, shap_max = shap_sum.min(), shap_sum.max()
+        shap_norm = (shap_sum - shap_min) / (shap_max - shap_min + 1e-8)
+
+        # On transforme les floats [0.0, 1.0] en entiers [0, 255] de type uint8
+        heatmap_8bit = np.uint8(255 * shap_norm)
         
-        # Overlay
-        superimposed = cv2.addWeighted(original_array, 0.6, heatmap, 0.4, 0)
-        result = Image.fromarray(superimposed)
+        # Application de la ColorMap
+        heatmap_color = cv2.applyColorMap(heatmap_8bit, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
         
-        return result
+        # 4. Superposition (Overlay)
+        superimposed = cv2.addWeighted(original_array, 0.6, heatmap_rgb, 0.4, 0)
+        
+        return Image.fromarray(superimposed)
 
 
 def apply_shap_image(model, image_path, transform, classes, device='cpu',
@@ -182,14 +192,7 @@ def apply_shap_image(model, image_path, transform, classes, device='cpu',
     
     # Get predicted class index
     pred_class_idx = classes.index(result['predicted_class'])
-    
-    # Create visualizations
-    viz_heatmap, shap_sum = explainer.visualize(
-        result['shap_values'],
-        result['image_tensor'],
-        pred_class_idx
-    )
-        
+            
     viz_overlay = explainer.visualize_overlay(
         image_path,
         result['shap_values'],
@@ -197,11 +200,8 @@ def apply_shap_image(model, image_path, transform, classes, device='cpu',
     )
     
     return {
-        'shap_values': result['shap_values'],
         'predicted_class': result['predicted_class'],
         'confidence': result['confidence'],
-        'probabilities': result['probabilities'],
-        'visualization_heatmap': viz_heatmap,
         'visualization_overlay': viz_overlay,
-        'shap_sum': shap_sum
+        'shap_values': result['shap_values']
     }

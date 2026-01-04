@@ -600,12 +600,16 @@ def classification_page():
                         grad_img = grad_predict_audio(spec, model, prediction, class_label)
                         st.pyplot(grad_img)
 
-                elif selected_xai == 'SHAP':
-                    st.write('### XAI Metrics using SHAP')
-                    with st.spinner('Generating SHAP values... This may take a moment.'):
-                        shap_fig = shap_predict_audio(spec, model)
-                        st.pyplot(shap_fig)
-                    st.info("SHAP highlights the most important features in the spectrogram for classification.")
+                elif selected_xai == "SHAP":
+                    # classifier est votre objet LungCancerClassifier mis en cache
+                    results = apply_shap_image(
+                        model=classifier.model,
+                        image_path=image, # l'objet PIL ou le chemin
+                        transform=classifier.transform,
+                        classes=classifier.classes,
+                        device=classifier.device
+                    )
+                    st.image(results['visualization_overlay'], caption="Zones d'influence (SHAP)")
                 
         
         # ==================== IMAGE PROCESSING ====================
@@ -639,21 +643,17 @@ def classification_page():
                         st.pyplot(grad_img)
                 
                 elif selected_xai == "SHAP":
-                    st.markdown(f"### {selected_xai}")
-                    with st.spinner(f"Generating SHAP..."):
-                        # On récupère le classifier complet pour avoir accès au transform et aux classes
-                        classifier = get_lung_classifier(selected_model)
-                        temp_path = save_pil_image(image)
-                        
-                        shap_result = apply_shap_image(
-                            model=classifier.model,
-                            image_path=temp_path,
-                            transform=classifier.transform,
-                            classes=classifier.classes,
-                            device=classifier.device
-                        )
-                        # Affichage du résultat SHAP
-                        st.image(shap_result['visualization_overlay'], use_column_width=True)
+                    # On récupère le classifier du cache
+                    classifier = get_lung_classifier(selected_model) 
+                    # On appelle la fonction de ton fichier shap_explainer.py
+                    results = apply_shap_image(
+                        model=classifier.model,
+                        image_path=image,
+                        transform=classifier.transform,
+                        classes=classifier.classes,
+                        device=classifier.device
+                    )
+                    st.image(results['visualization_overlay'], use_column_width=True)
     
     elif uploaded_file is None:
         if input_mode == "audio":
