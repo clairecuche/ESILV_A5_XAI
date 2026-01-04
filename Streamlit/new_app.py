@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 from keras.preprocessing.image import load_img, img_to_array
 import tensorflow as tf
 import shap
+from skimage.segmentation import slic
+from matplotlib.colors import LinearSegmentedColormap
 import lime
 from lime import lime_image
 from skimage.segmentation import mark_boundaries
@@ -23,6 +25,7 @@ import sys
 import torch
 import uuid
 from pathlib import Path
+
 
 import numpy as np
 if not hasattr(np, 'int'):
@@ -39,10 +42,6 @@ code_path = os.path.abspath(os.path.join(project_root, 'Code', 'Lung_Cancer_Dete
 if code_path not in sys.path:
     sys.path.insert(0, code_path)
 
-print(f"🔍 Project root: {project_root}")
-print(f"🔍 Code path: {code_path}")
-print(f"🔍 Path exists: {os.path.exists(code_path)}")
-
 # Import Lung Cancer modules (PyTorch) if available
 try:
     from Lung_Cancer_Model import LungCancerClassifier
@@ -50,7 +49,6 @@ try:
     from lime_explainer import apply_lime_image
     from shap_explainer import apply_shap_image
     LUNG_CANCER_AVAILABLE = True
-    print("✅ Lung Cancer modules imported successfully")
 except Exception as e:
     LUNG_CANCER_AVAILABLE = False
     print(f"❌ Failed to import Lung Cancer modules: {e}")
@@ -196,9 +194,9 @@ def predictions(image_data, model):
     class_label = np.argmax(prediction)
     return class_label, prediction
 
-def lime_predict(image_data, model):
+def lime_predict_audio(image_data, model):
     img_array = np.array(image_data)
-    img_array1 = img_array / 255.0
+    img_array1 = img_array / 255.0 # Normalisation
     img_array1 = img_array1.astype(np.float32)
     img_batch = np.expand_dims(img_array1, axis=0)
 
@@ -226,7 +224,7 @@ def lime_predict(image_data, model):
     plt.tight_layout()
     return(fig)
 
-def grad_predict(image_data, model_mob, preds, class_idx):
+def grad_predict_audio(image_data, model_mob, preds, class_idx):
     img_array = img_to_array(image_data)
     x = np.expand_dims(img_array, axis=0)
     x = tf.keras.applications.vgg16.preprocess_input(x)
@@ -259,176 +257,72 @@ def grad_predict(image_data, model_mob, preds, class_idx):
     plt.tight_layout()
     return(fig1)
 
-def shap_predict(image_data, model):
-    """SHAP-like explanation for audio using superpixel occlusion method"""
-    from skimage.segmentation import slic
-    from skimage.util import img_as_float
-    
-    img_array = np.array(image_data)
-    img_array1 = img_array / 255.0
-    img_array1 = img_array1.astype(np.float32)
-    
-    # Prédiction initiale
-    img_batch = np.expand_dims(img_array1, axis=0)
-    prediction = model_predict_numpy(model, img_batch)
-    class_label = np.argmax(prediction)
-    baseline_prob = prediction[0][class_label]
-    
-    try:
-        st.info("🔄 Computing feature importance using superpixel occlusion (~20 seconds)...")
-        
-        # Créer des superpixels (segments)
-        segments = slic(img_as_float(img_array), n_segments=80, compactness=10, sigma=1, start_label=0)
-        n_segments = len(np.unique(segments))
-        
-        st.text(f"Analyzing {n_segments} superpixels...")
-        
-        # Calculer l'importance de chaque superpixel
-        importance_values = np.zeros(n_segments)
-        progress_bar = st.progress(0)
-        
-        for seg_id in range(n_segments):
-            # Masquer ce superpixel
-            masked_img = img_array1.copy()
-            masked_img[segments == seg_id] = 0
-            
-            # Prédire avec superpixel masqué
-            masked_batch = np.expand_dims(masked_img, axis=0)
-            masked_pred = model_predict_numpy(model, masked_batch)
-            masked_prob = masked_pred[0][class_label]
-            
-            # Importance = différence de probabilité
-            importance_values[seg_id] = baseline_prob - masked_prob
-            
-            progress_bar.progress((seg_id + 1) / n_segments)
-        
-        progress_bar.empty()
-        
-        # Créer la carte d'importance
-        importance_map = np.zeros((224, 224))
-        for seg_id in range(n_segments):
-            importance_map[segments == seg_id] = importance_values[seg_id]
-        
-        # Stats
-        st.text(f"Importance range: [{importance_map.min():.4f}, {importance_map.max():.4f}]")
-        
-        # Créer la visualisation
-        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-        
-        # Image originale
-        axs[0].imshow(image_data)
-        axs[0].set_title("Original Spectrogram", fontsize=12, fontweight='bold')
-        axs[0].axis('off')
-        
-        # Importance map
-        vmax = max(np.abs(importance_map.min()), np.abs(importance_map.max()))
-        im = axs[1].imshow(importance_map, cmap='RdBu_r', interpolation='bilinear', 
-                          vmin=-vmax, vmax=vmax)
-        axs[1].set_title("Feature Importance\n(SHAP-like method)", fontsize=12, fontweight='bold')
-        axs[1].axis('off')
-        plt.colorbar(im, ax=axs[1], fraction=0.046, label='Importance')
-        
-        # Superposition (utiliser valeurs absolues pour highlight)
-        importance_abs = np.abs(importance_map)
-        importance_norm = importance_abs / (importance_abs.max() + 1e-8)
-        importance_colored = plt.cm.hot(importance_norm)[:, :, :3]
-        
-        img_normalized = np.array(image_data) / 255.0
-        overlay = 0.6 * img_normalized + 0.4 * importance_colored
-        overlay = np.clip(overlay, 0, 1)
-        
-        axs[2].imshow(overlay)
-        axs[2].set_title(f"Importance Overlay\nPredicted: {audio_class_names[class_label]}", 
-                        fontsize=12, fontweight='bold')
-        axs[2].axis('off')
-        
-        plt.tight_layout()
-        
-        st.success("✅ Feature importance computation completed!")
-        return fig
-        
-    except Exception as e:
-        st.error(f"Computation failed: {str(e)}")
-        print(f"Full error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Fallback: méthode plus simple par patches
-        st.warning("Falling back to patch-based method...")
-        return shap_predict_fallback(image_data, model, class_label)
+def shap_predict_audio(image_data, model):
+    # 1. Prétraitement de l'image
+    img_array = np.array(image_data).astype('float32')
+    if img_array.max() > 1.0:
+        img_array /= 255.0
 
+    # 2. Création de la segmentation (Super-pixels)
+    # On divise le spectrogramme en zones (segments) comme dans le notebook
+    segments_slic = slic(img_array, n_segments=50, compactness=10, sigma=1)
+    
+    # 3. Fonction de prédiction pour KernelExplainer
+    def f(z):
+        # Cette fonction remplace les segments par du gris si z=0
+        mask_value = img_array.mean()
+        out = np.zeros((z.shape[0], 224, 224, 3))
+        for i in range(z.shape[0]):
+            temp_img = img_array.copy()
+            for j in range(z.shape[1]):
+                if z[i, j] == 0:
+                    temp_img[segments_slic == j] = mask_value
+            out[i] = temp_img
+        
+        # Prédiction avec le modèle
+        if hasattr(model, 'predict'):
+            return model.predict(out)
+        else:
+            return model(tf.convert_to_tensor(out, dtype=tf.float32)).numpy()
 
-def shap_predict_fallback(image_data, model, class_label):
-    """Fallback method using simple occlusion"""
-    img_array = np.array(image_data)
-    img_array1 = img_array / 255.0
-    img_array1 = img_array1.astype(np.float32)
+    # 4. Kernel SHAP
+    # On explique la prédiction par rapport à un état "tout masqué" (zeros)
+    explainer = shap.KernelExplainer(f, np.zeros((1, 50)))
     
-    # Prédiction de base
-    img_batch = np.expand_dims(img_array1, axis=0)
-    baseline_pred = model_predict_numpy(model, img_batch)
-    baseline_prob = baseline_pred[0][class_label]
+    # nsamples=100 pour que ce soit supportable par Streamlit (le notebook utilise 1000)
+    shap_values = explainer.shap_values(np.ones((1, 50)), nsamples=100)
+
+    # 5. Visualisation (Logique des couleurs du notebook)
+    colors = []
+    for l in np.linspace(1, 0, 100): colors.append((245/255, 39/255, 87/255, l)) # Rouge
+    for l in np.linspace(0, 1, 100): colors.append((24/255, 196/255, 93/255, l)) # Vert
+    cm = LinearSegmentedColormap.from_list("shap", colors)
+
+    def fill_segmentation(values, segmentation):
+        out = np.zeros(segmentation.shape)
+        for i in range(len(values)):
+            out[segmentation == i] = values[i]
+        return out
+
+    # On récupère la classe prédite
+    preds = f(np.ones((1, 50)))
+    top_pred_idx = np.argmax(preds[0])
+
+    # Création de la figure
+    fig, ax = plt.subplots(figsize=(8, 6))
     
-    # Diviser en patches
-    patch_size = 28  # 224/8 = 28
-    n_patches = 224 // patch_size
+    # On remplit les segments avec les valeurs SHAP
+    # shap_values[top_pred_idx] car KernelSHAP renvoie une liste par classe
+    m = fill_segmentation(shap_values[top_pred_idx][0], segments_slic)
     
-    importance_map = np.zeros((n_patches, n_patches))
+    max_val = np.max(np.abs(m))
+    ax.imshow(img_array, alpha=0.3) # Image originale en fond
+    im = ax.imshow(m, cmap=cm, vmin=-max_val, vmax=max_val)
+    ax.axis('off')
     
-    progress_bar = st.progress(0)
-    total_patches = n_patches * n_patches
+    plt.colorbar(im, ax=ax, label="SHAP value (Importance)")
     
-    for i in range(n_patches):
-        for j in range(n_patches):
-            # Masquer ce patch
-            masked_img = img_array1.copy()
-            masked_img[i*patch_size:(i+1)*patch_size, 
-                      j*patch_size:(j+1)*patch_size, :] = 0
-            
-            # Prédire
-            masked_batch = np.expand_dims(masked_img, axis=0)
-            masked_pred = model_predict_numpy(model, masked_batch)
-            masked_prob = masked_pred[0][class_label]
-            
-            # Importance = différence de probabilité
-            importance_map[i, j] = baseline_prob - masked_prob
-            
-            progress_bar.progress((i * n_patches + j + 1) / total_patches)
-    
-    progress_bar.empty()
-    
-    # Upscale
-    from scipy.ndimage import zoom
-    importance_full = zoom(importance_map, (224/n_patches, 224/n_patches), order=1)
-    
-    # Créer visualisation
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    
-    axs[0].imshow(image_data)
-    axs[0].set_title("Original Spectrogram", fontsize=12, fontweight='bold')
-    axs[0].axis('off')
-    
-    im = axs[1].imshow(importance_full, cmap='RdBu_r', interpolation='bilinear')
-    axs[1].set_title("Feature Importance\n(Occlusion-based)", fontsize=12, fontweight='bold')
-    axs[1].axis('off')
-    plt.colorbar(im, ax=axs[1], fraction=0.046, label='Importance')
-    
-    importance_abs = np.abs(importance_full)
-    importance_norm = (importance_abs - importance_abs.min()) / (importance_abs.max() - importance_abs.min() + 1e-8)
-    importance_colored = plt.cm.hot(importance_norm)[:, :, :3]
-    
-    img_normalized = np.array(image_data) / 255.0
-    overlay = 0.6 * img_normalized + 0.4 * importance_colored
-    overlay = np.clip(overlay, 0, 1)
-    
-    axs[2].imshow(overlay)
-    axs[2].set_title(f"Importance Overlay\nPredicted: {audio_class_names[class_label]}", 
-                    fontsize=12, fontweight='bold')
-    axs[2].axis('off')
-    
-    plt.tight_layout()
     return fig
-
 
 # ============================================
 # IMAGE FUNCTIONS (LUNG CANCER)
@@ -697,19 +591,19 @@ def classification_page():
                 if selected_xai == 'LIME':
                     st.write('### XAI Metrics using LIME')
                     with st.spinner('Generating LIME...'):
-                        fig2 = lime_predict(spec, model)
+                        fig2 = lime_predict_audio(spec, model)
                         st.pyplot(fig2)
                 
                 elif selected_xai == 'Grad-CAM':
                     st.write('### XAI Metrics using Grad-CAM')
                     with st.spinner('Generating Grad-CAM...'):
-                        grad_img = grad_predict(spec, model, prediction, class_label)
+                        grad_img = grad_predict_audio(spec, model, prediction, class_label)
                         st.pyplot(grad_img)
 
                 elif selected_xai == 'SHAP':
                     st.write('### XAI Metrics using SHAP')
                     with st.spinner('Generating SHAP values... This may take a moment.'):
-                        shap_fig = shap_predict(spec, model)
+                        shap_fig = shap_predict_audio(spec, model)
                         st.pyplot(shap_fig)
                     st.info("SHAP highlights the most important features in the spectrogram for classification.")
                 
@@ -836,10 +730,10 @@ def comparison_page():
                         st.markdown(f"### {method}")
                         with st.spinner(f"Generating {method}..."):
                             if method == "LIME":
-                                fig = lime_predict(spec, model)
+                                fig = lime_predict_audio(spec, model)
                                 st.pyplot(fig)
                             elif method == "Grad-CAM":
-                                fig = grad_predict(spec, model, prediction, class_label)
+                                fig = grad_predict_audio(spec, model, prediction, class_label)
                                 st.pyplot(fig)
             
             else:  # image
