@@ -35,7 +35,6 @@ try:
     from gradcam import apply_gradcam
     # Note: lime_explainer et shap ne sont pas encore implémentés, on les fera après
     LUNG_CANCER_AVAILABLE = True
-    print("✅ Lung Cancer modules imported successfully")
 except Exception as e:
     LUNG_CANCER_AVAILABLE = False
     print(f"❌ Failed to import Lung Cancer modules: {e}")
@@ -84,7 +83,6 @@ def save_file(sound_file):
     streamlit_dir = os.path.dirname(__file__)
     project_root = os.path.dirname(streamlit_dir)
 
-    # Primary location: project root audio_files (as requested)
     primary_dir = os.path.join(project_root, 'audio_files')
 
     if hasattr(sound_file, 'getbuffer'):
@@ -96,13 +94,11 @@ def save_file(sound_file):
             pass
         data = sound_file.read()
 
-    # Ensure primary directory exists and save there
     os.makedirs(primary_dir, exist_ok=True)
     primary_path = os.path.join(primary_dir, filename)
     with open(primary_path, 'wb') as f:
         f.write(data)
 
-    # Return the filename (and primary path if needed later)
     return filename
 
 
@@ -168,9 +164,9 @@ def predictions(image_data, model):
     img_array1 = img_array1.astype(np.float32)  # Ensure float32 for SavedModel
     img_batch = np.expand_dims(img_array1, axis=0)
 
-    preds = model_predict_numpy(model, img_batch)
-    class_label = np.argmax(preds)
-    return class_label, preds
+    prediction = model_predict_numpy(model, img_batch)
+    class_label = np.argmax(prediction)
+    return class_label, prediction
 
 def lime_predict(image_data, model):
     img_array = np.array(image_data)
@@ -182,6 +178,7 @@ def lime_predict(image_data, model):
     class_label = np.argmax(prediction)
 
     explainer = lime.lime_image.LimeImageExplainer()
+
     # Use our numpy prediction wrapper inside LIME
     explanation = explainer.explain_instance(
         img_array1.astype('float32'),
@@ -470,26 +467,16 @@ def classification_page():
         class_names = image_class_names
     
     if uploaded_file is not None:
-        available_models = XAICompatibility.get_available_models(input_mode)
         available_xai = XAICompatibility.get_available_xai_methods(input_mode)
         
         st.subheader("⚙️ Configuration")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            selected_model = st.selectbox(
-                "Select Model",
-                available_models,
-                help=f"Models compatible with {input_mode} input"
-            )
-        
-        with col2:
-            selected_xai = st.selectbox(
-                "Select XAI Method",
-                available_xai,
-                help=f"XAI methods available for {input_mode}"
-            )
-        
+              
+        selected_xai = st.selectbox(
+            "Select XAI Method",
+            available_xai,
+            help=f"XAI methods available for {input_mode}"
+        )
+    
         st.write('___')
         
         # ==================== AUDIO PROCESSING ====================
@@ -526,6 +513,8 @@ def classification_page():
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict(spec, model, prediction, class_label)
                         st.pyplot(grad_img)
+                
+                #rajouter SHAP
         
         # ==================== IMAGE PROCESSING ====================
         else:
@@ -556,6 +545,8 @@ def classification_page():
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict_image(image, selected_model, prediction, class_label)
                         st.pyplot(grad_img)
+                
+                #rajouter SHAP 
     
     elif uploaded_file is None:
         if input_mode == "audio":
