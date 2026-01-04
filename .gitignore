@@ -1,1 +1,8 @@
 .venv/
+audio_files/
+image_files/
+saved_model/
+__pycache__/
+*.pyc
+melspectrogram.png
+
