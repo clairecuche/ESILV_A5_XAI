@@ -13,6 +13,7 @@ import librosa.display
 import matplotlib.pyplot as plt
 from keras.preprocessing.image import load_img, img_to_array
 import tensorflow as tf
+import shap
 import lime
 from lime import lime_image
 from skimage.segmentation import mark_boundaries
@@ -22,6 +23,14 @@ import sys
 import torch
 import uuid
 from pathlib import Path
+
+import numpy as np
+if not hasattr(np, 'int'):
+    np.int = int
+if not hasattr(np, 'float'):
+    np.float = float
+if not hasattr(np, 'bool'):
+    np.bool = bool
 
 # Ensure project Code/ modules are importable when running from Streamlit folder
 project_root = os.path.dirname(os.path.dirname(__file__))
@@ -33,7 +42,8 @@ if code_path not in sys.path:
 try:
     from Lung_Cancer_Model import LungCancerClassifier
     from gradcam import apply_gradcam
-    # Note: lime_explainer et shap ne sont pas encore implémentés, on les fera après
+    from lime_explainer import apply_lime_image
+    from shap_explainer import apply_shap_image
     LUNG_CANCER_AVAILABLE = True
 except Exception as e:
     LUNG_CANCER_AVAILABLE = False
@@ -70,6 +80,16 @@ class XAICompatibility:
         elif input_type == "image":
             return ["DenseNet121", "AlexNet"]
         return []
+    
+
+@st.cache(allow_output_mutation=True)
+def get_lung_classifier(model_name):
+    """Charge le modèle PyTorch une seule fois et le garde en RAM"""
+    model_key = model_name.lower().replace("121", "").replace(" ", "")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    classifier = LungCancerClassifier(model_name=model_key, device=device)
+    classifier.model.eval() # Fixe les couches de Dropout/BatchNormalization
+    return classifier
 
 # ============================================
 # AUDIO FUNCTIONS 
@@ -231,6 +251,177 @@ def grad_predict(image_data, model_mob, preds, class_idx):
     plt.tight_layout()
     return(fig1)
 
+def shap_predict(image_data, model):
+    """SHAP-like explanation for audio using superpixel occlusion method"""
+    from skimage.segmentation import slic
+    from skimage.util import img_as_float
+    
+    img_array = np.array(image_data)
+    img_array1 = img_array / 255.0
+    img_array1 = img_array1.astype(np.float32)
+    
+    # Prédiction initiale
+    img_batch = np.expand_dims(img_array1, axis=0)
+    prediction = model_predict_numpy(model, img_batch)
+    class_label = np.argmax(prediction)
+    baseline_prob = prediction[0][class_label]
+    
+    try:
+        st.info("🔄 Computing feature importance using superpixel occlusion (~20 seconds)...")
+        
+        # Créer des superpixels (segments)
+        segments = slic(img_as_float(img_array), n_segments=80, compactness=10, sigma=1, start_label=0)
+        n_segments = len(np.unique(segments))
+        
+        st.text(f"Analyzing {n_segments} superpixels...")
+        
+        # Calculer l'importance de chaque superpixel
+        importance_values = np.zeros(n_segments)
+        progress_bar = st.progress(0)
+        
+        for seg_id in range(n_segments):
+            # Masquer ce superpixel
+            masked_img = img_array1.copy()
+            masked_img[segments == seg_id] = 0
+            
+            # Prédire avec superpixel masqué
+            masked_batch = np.expand_dims(masked_img, axis=0)
+            masked_pred = model_predict_numpy(model, masked_batch)
+            masked_prob = masked_pred[0][class_label]
+            
+            # Importance = différence de probabilité
+            importance_values[seg_id] = baseline_prob - masked_prob
+            
+            progress_bar.progress((seg_id + 1) / n_segments)
+        
+        progress_bar.empty()
+        
+        # Créer la carte d'importance
+        importance_map = np.zeros((224, 224))
+        for seg_id in range(n_segments):
+            importance_map[segments == seg_id] = importance_values[seg_id]
+        
+        # Stats
+        st.text(f"Importance range: [{importance_map.min():.4f}, {importance_map.max():.4f}]")
+        
+        # Créer la visualisation
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Image originale
+        axs[0].imshow(image_data)
+        axs[0].set_title("Original Spectrogram", fontsize=12, fontweight='bold')
+        axs[0].axis('off')
+        
+        # Importance map
+        vmax = max(np.abs(importance_map.min()), np.abs(importance_map.max()))
+        im = axs[1].imshow(importance_map, cmap='RdBu_r', interpolation='bilinear', 
+                          vmin=-vmax, vmax=vmax)
+        axs[1].set_title("Feature Importance\n(SHAP-like method)", fontsize=12, fontweight='bold')
+        axs[1].axis('off')
+        plt.colorbar(im, ax=axs[1], fraction=0.046, label='Importance')
+        
+        # Superposition (utiliser valeurs absolues pour highlight)
+        importance_abs = np.abs(importance_map)
+        importance_norm = importance_abs / (importance_abs.max() + 1e-8)
+        importance_colored = plt.cm.hot(importance_norm)[:, :, :3]
+        
+        img_normalized = np.array(image_data) / 255.0
+        overlay = 0.6 * img_normalized + 0.4 * importance_colored
+        overlay = np.clip(overlay, 0, 1)
+        
+        axs[2].imshow(overlay)
+        axs[2].set_title(f"Importance Overlay\nPredicted: {audio_class_names[class_label]}", 
+                        fontsize=12, fontweight='bold')
+        axs[2].axis('off')
+        
+        plt.tight_layout()
+        
+        st.success("✅ Feature importance computation completed!")
+        return fig
+        
+    except Exception as e:
+        st.error(f"Computation failed: {str(e)}")
+        print(f"Full error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Fallback: méthode plus simple par patches
+        st.warning("Falling back to patch-based method...")
+        return shap_predict_fallback(image_data, model, class_label)
+
+
+def shap_predict_fallback(image_data, model, class_label):
+    """Fallback method using simple occlusion"""
+    img_array = np.array(image_data)
+    img_array1 = img_array / 255.0
+    img_array1 = img_array1.astype(np.float32)
+    
+    # Prédiction de base
+    img_batch = np.expand_dims(img_array1, axis=0)
+    baseline_pred = model_predict_numpy(model, img_batch)
+    baseline_prob = baseline_pred[0][class_label]
+    
+    # Diviser en patches
+    patch_size = 28  # 224/8 = 28
+    n_patches = 224 // patch_size
+    
+    importance_map = np.zeros((n_patches, n_patches))
+    
+    progress_bar = st.progress(0)
+    total_patches = n_patches * n_patches
+    
+    for i in range(n_patches):
+        for j in range(n_patches):
+            # Masquer ce patch
+            masked_img = img_array1.copy()
+            masked_img[i*patch_size:(i+1)*patch_size, 
+                      j*patch_size:(j+1)*patch_size, :] = 0
+            
+            # Prédire
+            masked_batch = np.expand_dims(masked_img, axis=0)
+            masked_pred = model_predict_numpy(model, masked_batch)
+            masked_prob = masked_pred[0][class_label]
+            
+            # Importance = différence de probabilité
+            importance_map[i, j] = baseline_prob - masked_prob
+            
+            progress_bar.progress((i * n_patches + j + 1) / total_patches)
+    
+    progress_bar.empty()
+    
+    # Upscale
+    from scipy.ndimage import zoom
+    importance_full = zoom(importance_map, (224/n_patches, 224/n_patches), order=1)
+    
+    # Créer visualisation
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    
+    axs[0].imshow(image_data)
+    axs[0].set_title("Original Spectrogram", fontsize=12, fontweight='bold')
+    axs[0].axis('off')
+    
+    im = axs[1].imshow(importance_full, cmap='RdBu_r', interpolation='bilinear')
+    axs[1].set_title("Feature Importance\n(Occlusion-based)", fontsize=12, fontweight='bold')
+    axs[1].axis('off')
+    plt.colorbar(im, ax=axs[1], fraction=0.046, label='Importance')
+    
+    importance_abs = np.abs(importance_full)
+    importance_norm = (importance_abs - importance_abs.min()) / (importance_abs.max() - importance_abs.min() + 1e-8)
+    importance_colored = plt.cm.hot(importance_norm)[:, :, :3]
+    
+    img_normalized = np.array(image_data) / 255.0
+    overlay = 0.6 * img_normalized + 0.4 * importance_colored
+    overlay = np.clip(overlay, 0, 1)
+    
+    axs[2].imshow(overlay)
+    axs[2].set_title(f"Importance Overlay\nPredicted: {audio_class_names[class_label]}", 
+                    fontsize=12, fontweight='bold')
+    axs[2].axis('off')
+    
+    plt.tight_layout()
+    return fig
+
+
 # ============================================
 # IMAGE FUNCTIONS (LUNG CANCER)
 # ============================================
@@ -268,21 +459,18 @@ def load_and_preprocess_image(image_path, target_size=(224, 224)):
     image = image.resize(target_size)
     return image
 
-def predictions_image(image_data, model_name="DenseNet121"):
+def predictions_image(image_data, model_name):
     """Predict image class using LungCancerClassifier"""
     if not LUNG_CANCER_AVAILABLE:
         st.error("Lung Cancer modules not available")
         return 0, np.array([[0.5, 0.5]])
     
     try:
-        # Extraire le nom du modèle (densenet ou alexnet)
-        model_key = model_name.lower().replace("121", "").replace(" ", "")
-        
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        classifier = LungCancerClassifier(model_name=model_key, device=device)
-        
-        # Prédiction
-        result = classifier.predict(image_data)
+        classifier = get_lung_classifier(model_name)
+
+        with torch.no_grad():
+            # Prédiction
+            result = classifier.predict(image_data)
         
         # Convertir en format compatible
         probs = np.array([[
@@ -298,11 +486,10 @@ def predictions_image(image_data, model_name="DenseNet121"):
         st.error(f"Error in prediction: {str(e)}")
         return 0, np.array([[0.5, 0.5]])
 
-def lime_predict_image(image_data, model_name="DenseNet121"):
-    """LIME explanation for chest X-ray"""
+def lime_predict_image(image_data, model_name):
+    """LIME explanation for chest X-ray using dedicated lime_explainer module"""
     if not LUNG_CANCER_AVAILABLE:
         st.error("Lung Cancer modules not available")
-        class_label, prediction = predictions_image(image_data, model_name)
         fig, axs = plt.subplots(1, 2, figsize=(12, 6))
         axs[0].imshow(image_data)
         axs[0].set_title("Original X-ray")
@@ -314,70 +501,53 @@ def lime_predict_image(image_data, model_name="DenseNet121"):
         return fig
     
     try:
-        # Sauvegarder l'image temporairement
+        # Sauvegarder l'image
         temp_path = save_pil_image(image_data)
         
         model_key = model_name.lower().replace("121", "").replace(" ", "")
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        classifier = LungCancerClassifier(model_name=model_key, device=device)
+        classifier = get_lung_classifier(model_name)
+        classifier.model.eval()
         
-        # Fonction de prédiction pour LIME
-        def predict_fn(images):
-            batch = torch.stack([
-                classifier.transform(Image.fromarray(img.astype('uint8'))) 
-                for img in images
-            ])
-            batch = batch.to(device)
-            
-            with torch.no_grad():
-                outputs = classifier.model(batch)
-                probs = torch.nn.functional.softmax(outputs, dim=1)
-            
-            return probs.cpu().numpy()
-        
-        # Créer explainer
-        img_array = np.array(image_data.resize((224, 224)))
-        explainer = lime_image.LimeImageExplainer()
-        explanation = explainer.explain_instance(
-            img_array,
-            predict_fn,
-            top_labels=2,
-            hide_color=0,
-            num_samples=500
+        # Utiliser le module dédié lime_explainer
+        lime_result = apply_lime_image(
+            classifier.model,
+            temp_path,
+            classifier.transform,
+            classifier.classes,
+            device=device,
+            num_samples=500,
+            num_features=10
         )
         
-        # Générer visualisation
-        temp, mask = explanation.get_image_and_mask(
-            explanation.top_labels[0],
-            positive_only=False,
-            num_features=10,
-            hide_rest=False
-        )
-        
-        img_boundry = mark_boundaries(temp / 255.0, mask)
-        
-        # Créer figure
+        # Créer figure à partir du résultat
         fig, axs = plt.subplots(1, 2, figsize=(12, 6))
         axs[0].imshow(image_data)
-        axs[0].set_title("Original X-ray")
+        axs[0].set_title("Original X-ray", fontsize=12, fontweight='bold')
         axs[0].axis('off')
-        axs[1].imshow(img_boundry)
-        axs[1].set_title(f"LIME Explanation")
+        
+        # Afficher la visualisation LIME
+        axs[1].imshow(lime_result['visualization'])
+        axs[1].set_title(f"LIME Explanation\nPredicted: {lime_result['predicted_class']}", 
+                        fontsize=12, fontweight='bold')
         axs[1].axis('off')
+        
         plt.tight_layout()
         
         return fig
     
     except Exception as e:
         st.error(f"Error in LIME: {str(e)}")
+        st.exception(e)
         fig, ax = plt.subplots(figsize=(8, 8))
         ax.imshow(image_data)
         ax.set_title("Error generating LIME")
         ax.axis('off')
         return fig
 
-def grad_predict_image(image_data, model_name="DenseNet121", preds=None, class_idx=None):
-    """Grad-CAM explanation using GradCAM implementation"""
+
+def grad_predict_image(image_data, model_name, preds=None, class_idx=None):
+    """Grad-CAM explanation using dedicated gradcam module"""
     if not LUNG_CANCER_AVAILABLE:
         st.error("Lung Cancer modules not available")
         fig, ax = plt.subplots(1, 2, figsize=(12, 6))
@@ -396,21 +566,27 @@ def grad_predict_image(image_data, model_name="DenseNet121", preds=None, class_i
         
         model_key = model_name.lower().replace("121", "").replace(" ", "")
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        classifier = LungCancerClassifier(model_name=model_key, device=device)
+        classifier = get_lung_classifier(model_name)
+        classifier.model.eval()
         
         # Préparer le tenseur
         image_tensor = classifier.preprocess_image(temp_path)
         
-        # Appliquer Grad-CAM
-        vis, heatmap = apply_gradcam(classifier.model, temp_path, image_tensor, model_name=model_key)
+        # Utiliser le module dédié gradcam
+        vis, heatmap = apply_gradcam(
+            classifier.model, 
+            temp_path, 
+            image_tensor, 
+            model_name=model_key
+        )
         
         # Créer figure
         fig, axs = plt.subplots(1, 2, figsize=(12, 6))
         axs[0].imshow(image_data)
-        axs[0].set_title("Original X-ray")
+        axs[0].set_title("Original X-ray", fontsize=12, fontweight='bold')
         axs[0].axis('off')
         axs[1].imshow(vis)
-        axs[1].set_title("Grad-CAM Visualization")
+        axs[1].set_title("Grad-CAM Visualization", fontsize=12, fontweight='bold')
         axs[1].axis('off')
         plt.tight_layout()
         
@@ -471,14 +647,21 @@ def classification_page():
         
         st.subheader("⚙️ Configuration")
               
-        selected_xai = st.selectbox(
-            "Select XAI Method",
-            available_xai,
-            help=f"XAI methods available for {input_mode}"
-        )
+        col1, col2 = st.columns(2)
+              
+        with col1:
+            if input_mode == "image":
+                selected_model = st.selectbox("Select Model", ["AlexNet", "DenseNet"])
+            
+
+        with col2:
+            selected_xai = st.selectbox(
+                "Select XAI Method",
+                available_xai,
+                help=f"XAI methods available for {input_mode}"
+            )
     
         st.write('___')
-        
         # ==================== AUDIO PROCESSING ====================
         if input_mode == "audio":
             st.write('### Play audio')
@@ -513,8 +696,14 @@ def classification_page():
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict(spec, model, prediction, class_label)
                         st.pyplot(grad_img)
+
+                elif selected_xai == 'SHAP':
+                    st.write('### XAI Metrics using SHAP')
+                    with st.spinner('Generating SHAP values... This may take a moment.'):
+                        shap_fig = shap_predict(spec, model)
+                        st.pyplot(shap_fig)
+                    st.info("SHAP highlights the most important features in the spectrogram for classification.")
                 
-                #rajouter SHAP
         
         # ==================== IMAGE PROCESSING ====================
         else:
@@ -546,7 +735,22 @@ def classification_page():
                         grad_img = grad_predict_image(image, selected_model, prediction, class_label)
                         st.pyplot(grad_img)
                 
-                #rajouter SHAP 
+                elif selected_xai == "SHAP":
+                    st.markdown(f"### {selected_xai}")
+                    with st.spinner(f"Generating SHAP..."):
+                        # On récupère le classifier complet pour avoir accès au transform et aux classes
+                        classifier = get_lung_classifier(selected_model)
+                        temp_path = save_pil_image(image)
+                        
+                        shap_result = apply_shap_image(
+                            model=classifier.model,
+                            image_path=temp_path,
+                            transform=classifier.transform,
+                            classes=classifier.classes,
+                            device=classifier.device
+                        )
+                        # Affichage du résultat SHAP
+                        st.image(shap_result['visualization_overlay'], use_column_width=True)
     
     elif uploaded_file is None:
         if input_mode == "audio":
