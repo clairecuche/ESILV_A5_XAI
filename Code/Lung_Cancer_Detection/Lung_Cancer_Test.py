@@ -6,7 +6,7 @@ import torch
 from Lung_Cancer_Model import LungCancerClassifier
 from gradcam import apply_gradcam
 from lime_explainer import apply_lime_image
-from shap import apply_shap_image
+from shap_explainer import apply_shap_image
 
 # Check for GPU
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -23,7 +23,8 @@ print(f"Model loaded: {classifier.model_name}")
 # 2. MAKE PREDICTION
 # ============================================
 print("\n2. Making prediction...")
-image_path = "../../img/Lung_Cancer/image3.png"  # Replace with your image
+#image_path = "../../img/Lung_Cancer/image3.png"  # Replace with your image
+image_path = "C:\\Users\\benoi\\OneDrive - De Vinci\\A5 ESILV\\Explainability AI\\Projet\\ESILV_A5_XAI\\img\\Lung_Cancer\\image3.png"
 
 result = classifier.predict(image_path)
 print(f"Prediction: {result['prediction']}")

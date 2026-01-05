@@ -82,20 +82,29 @@ class XAICompatibility:
     def get_available_models(input_type):
         """Return compatible models for input type"""
         if input_type == "audio":
-            return ["MobileNet (Audio)", "VGG16 (Audio)", "Custom CNN"]
+            return ["SavedModel (Audio)"]
+            #return ["MobileNet (Audio)", "VGG16 (Audio)", "Custom CNN"]
         elif input_type == "image":
             return ["DenseNet121", "AlexNet"]
         return []
     
+# ============================================
+# CACHING MODELS
+# ============================================
 
 @st.cache(allow_output_mutation=True)
 def get_lung_classifier(model_name):
-    """Charge le modèle PyTorch une seule fois et le garde en RAM"""
+    """Load the PyTorch model once and keep it in memory"""
     model_key = model_name.lower().replace("121", "").replace(" ", "")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     classifier = LungCancerClassifier(model_name=model_key, device=device)
     classifier.model.eval() # Fixe les couches de Dropout/BatchNormalization
     return classifier
+
+@st.cache(allow_output_mutation=True)
+def load_audio_model_cached(model_path):
+    """Load TensorFlow SavedModel once and keep it in memory"""
+    return tf.saved_model.load(model_path)
 
 # ============================================
 # AUDIO FUNCTIONS 
@@ -187,7 +196,7 @@ def model_predict_numpy(model, img_batch: np.ndarray):
 def predictions(image_data, model):
     img_array = np.array(image_data)
     img_array1 = img_array / 255.0
-    img_array1 = img_array1.astype(np.float32)  # Ensure float32 for SavedModel
+    img_array1 = img_array1.astype(np.float32)  
     img_batch = np.expand_dims(img_array1, axis=0)
 
     prediction = model_predict_numpy(model, img_batch)
@@ -205,7 +214,6 @@ def lime_predict_audio(image_data, model):
 
     explainer = lime.lime_image.LimeImageExplainer()
 
-    # Use our numpy prediction wrapper inside LIME
     explanation = explainer.explain_instance(
         img_array1.astype('float32'),
         lambda x: model_predict_numpy(model, x.astype('float32')),
@@ -213,14 +221,13 @@ def lime_predict_audio(image_data, model):
         num_samples=1000
     )
     
-    fig, axs = plt.subplots(1, 2, figsize=(10, 25))
     temp, mask = explanation.get_image_and_mask(np.argmax(prediction[0], axis=0), 
                                                 positive_only=False, 
                                                 num_features=8, 
                                                 hide_rest=True)
-    axs[0].imshow(image_data)
-    axs[1].imshow(mark_boundaries(temp, mask))
-    axs[1].set_title(f"Predicted class: {audio_class_names[class_label]}")
+    fig,ax=plt.subplots(figsize=(6,6))
+    ax.imshow(mark_boundaries(temp, mask))
+    ax.axis('off')
     plt.tight_layout()
     return(fig)
 
@@ -250,26 +257,24 @@ def grad_predict_audio(image_data, model_mob, preds, class_idx):
     heatmap = heatmap.astype(np.float32)
     superimposed_img = cv2.addWeighted(x[0], 0.6, heatmap, 0.4, 0, dtype=cv2.CV_32F)
 
-    fig1, ax = plt.subplots(1, 2, figsize=(10, 25))
-    ax[0].imshow(image_data)
-    ax[1].imshow(superimposed_img)
-    ax[1].set_title(f"Predicted class: {audio_class_names[class_idx]}")
+    fig1, ax = plt.subplots(figsize=(6,6))
+    ax.imshow(superimposed_img)
+    ax.axis('off')
     plt.tight_layout()
     return(fig1)
 
 def shap_predict_audio(image_data, model):
-    # 1. Prétraitement de l'image
+
+    # Preprocess the image to a numpy array
     img_array = np.array(image_data).astype('float32')
     if img_array.max() > 1.0:
         img_array /= 255.0
 
-    # 2. Création de la segmentation (Super-pixels)
-    # On divise le spectrogramme en zones (segments) comme dans le notebook
-    segments_slic = slic(img_array, n_segments=50, compactness=10, sigma=1)
+    # Creation of segmentation (Super-pixels)
+    segments_slic = slic(img_array, n_segments=50, compactness=10, sigma=1)    # The spectrogram is divided into segments.
     
-    # 3. Fonction de prédiction pour KernelExplainer
+    # Prediction function for KernelExplainer
     def f(z):
-        # Cette fonction remplace les segments par du gris si z=0
         mask_value = img_array.mean()
         out = np.zeros((z.shape[0], 224, 224, 3))
         for i in range(z.shape[0]):
@@ -278,24 +283,19 @@ def shap_predict_audio(image_data, model):
                 if z[i, j] == 0:
                     temp_img[segments_slic == j] = mask_value
             out[i] = temp_img
-        
-        # Prédiction avec le modèle
         if hasattr(model, 'predict'):
             return model.predict(out)
         else:
             return model(tf.convert_to_tensor(out, dtype=tf.float32)).numpy()
 
-    # 4. Kernel SHAP
-    # On explique la prédiction par rapport à un état "tout masqué" (zeros)
+    # Kernel SHAP
     explainer = shap.KernelExplainer(f, np.zeros((1, 50)))
-    
-    # nsamples=100 pour que ce soit supportable par Streamlit (le notebook utilise 1000)
     shap_values = explainer.shap_values(np.ones((1, 50)), nsamples=100)
 
-    # 5. Visualisation (Logique des couleurs du notebook)
+    # Visualisation 
     colors = []
-    for l in np.linspace(1, 0, 100): colors.append((245/255, 39/255, 87/255, l)) # Rouge
-    for l in np.linspace(0, 1, 100): colors.append((24/255, 196/255, 93/255, l)) # Vert
+    for l in np.linspace(1, 0, 100): colors.append((245/255, 39/255, 87/255, l)) 
+    for l in np.linspace(0, 1, 100): colors.append((24/255, 196/255, 93/255, l)) 
     cm = LinearSegmentedColormap.from_list("shap", colors)
 
     def fill_segmentation(values, segmentation):
@@ -304,19 +304,14 @@ def shap_predict_audio(image_data, model):
             out[segmentation == i] = values[i]
         return out
 
-    # On récupère la classe prédite
+    # We retrieve the predicted class
     preds = f(np.ones((1, 50)))
     top_pred_idx = np.argmax(preds[0])
 
-    # Création de la figure
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    # On remplit les segments avec les valeurs SHAP
-    # shap_values[top_pred_idx] car KernelSHAP renvoie une liste par classe
+    fig, ax = plt.subplots(figsize=(8, 8))
     m = fill_segmentation(shap_values[top_pred_idx][0], segments_slic)
-    
     max_val = np.max(np.abs(m))
-    ax.imshow(img_array, alpha=0.3) # Image originale en fond
+    ax.imshow(img_array, alpha=0.3) # Original image in background
     im = ax.imshow(m, cmap=cm, vmin=-max_val, vmax=max_val)
     ax.axis('off')
     
@@ -371,10 +366,8 @@ def predictions_image(image_data, model_name):
         classifier = get_lung_classifier(model_name)
 
         with torch.no_grad():
-            # Prédiction
             result = classifier.predict(image_data)
         
-        # Convertir en format compatible
         probs = np.array([[
             result['probabilities'][classifier.classes[0]], 
             result['probabilities'][classifier.classes[1]]
@@ -403,7 +396,6 @@ def lime_predict_image(image_data, model_name):
         return fig
     
     try:
-        # Sauvegarder l'image
         temp_path = save_pil_image(image_data)
         
         model_key = model_name.lower().replace("121", "").replace(" ", "")
@@ -411,7 +403,6 @@ def lime_predict_image(image_data, model_name):
         classifier = get_lung_classifier(model_name)
         classifier.model.eval()
         
-        # Utiliser le module dédié lime_explainer
         lime_result = apply_lime_image(
             classifier.model,
             temp_path,
@@ -422,17 +413,11 @@ def lime_predict_image(image_data, model_name):
             num_features=10
         )
         
-        # Créer figure à partir du résultat
-        fig, axs = plt.subplots(1, 2, figsize=(12, 6))
-        axs[0].imshow(image_data)
-        axs[0].set_title("Original X-ray", fontsize=12, fontweight='bold')
-        axs[0].axis('off')
-        
-        # Afficher la visualisation LIME
-        axs[1].imshow(lime_result['visualization'])
-        axs[1].set_title(f"LIME Explanation\nPredicted: {lime_result['predicted_class']}", 
-                        fontsize=12, fontweight='bold')
-        axs[1].axis('off')
+        # Create figure 
+        fig, axs = plt.subplots(figsize=(6, 6))
+        # Display the LIME visualization
+        axs.imshow(lime_result['visualization'])
+        axs.axis('off')
         
         plt.tight_layout()
         
@@ -463,7 +448,6 @@ def grad_predict_image(image_data, model_name, preds=None, class_idx=None):
         return fig
     
     try:
-        # Sauvegarder l'image
         temp_path = save_pil_image(image_data)
         
         model_key = model_name.lower().replace("121", "").replace(" ", "")
@@ -471,25 +455,19 @@ def grad_predict_image(image_data, model_name, preds=None, class_idx=None):
         classifier = get_lung_classifier(model_name)
         classifier.model.eval()
         
-        # Préparer le tenseur
         image_tensor = classifier.preprocess_image(temp_path)
         
-        # Utiliser le module dédié gradcam
         vis, heatmap = apply_gradcam(
             classifier.model, 
             temp_path, 
             image_tensor, 
             model_name=model_key
         )
-        
-        # Créer figure
-        fig, axs = plt.subplots(1, 2, figsize=(12, 6))
-        axs[0].imshow(image_data)
-        axs[0].set_title("Original X-ray", fontsize=12, fontweight='bold')
-        axs[0].axis('off')
-        axs[1].imshow(vis)
-        axs[1].set_title("Grad-CAM Visualization", fontsize=12, fontweight='bold')
-        axs[1].axis('off')
+
+        # Create figure
+        fig, axs = plt.subplots(figsize=(6, 6))
+        axs.imshow(vis)
+        axs.axis('off')
         plt.tight_layout()
         
         return fig
@@ -553,8 +531,11 @@ def classification_page():
         col1, col2 = st.columns(2)
               
         with col1:
-            if input_mode == "image":
-                selected_model = st.selectbox("Select Model", ["AlexNet", "DenseNet"])
+            selected_model = st.selectbox(
+                "Select Model",
+                available_models,
+                help=f"Models available for {input_mode}"
+            )
             
 
         with col2:
@@ -578,7 +559,7 @@ def classification_page():
             with st.spinner('Generating spectrogram...'):
                 spec = create_spectrogram(sound)
                 st.image(spec, width=700)
-                model = tf.saved_model.load('./saved_model/model')
+                model = load_audio_model_cached('./saved_model/model')
             
             st.write('### Classification results:')
             class_label, prediction = predictions(spec, model)
@@ -599,19 +580,14 @@ def classification_page():
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict_audio(spec, model, prediction, class_label)
                         st.pyplot(grad_img)
-
-                elif selected_xai == "SHAP":
-                    # classifier est votre objet LungCancerClassifier mis en cache
-                    results = apply_shap_image(
-                        model=classifier.model,
-                        image_path=image, # l'objet PIL ou le chemin
-                        transform=classifier.transform,
-                        classes=classifier.classes,
-                        device=classifier.device
-                    )
-                    st.image(results['visualization_overlay'], caption="Zones d'influence (SHAP)")
                 
-        
+                elif selected_xai == "SHAP":
+                    st.write("### SHAP Analysis (Segmentation)")
+                    with st.spinner("Calculating zones..."):
+                        fig = shap_predict_audio(spec, model)
+                        st.pyplot(fig)
+
+    
         # ==================== IMAGE PROCESSING ====================
         else:
             st.write('### Uploaded X-ray:')
@@ -643,17 +619,19 @@ def classification_page():
                         st.pyplot(grad_img)
                 
                 elif selected_xai == "SHAP":
-                    # On récupère le classifier du cache
-                    classifier = get_lung_classifier(selected_model) 
-                    # On appelle la fonction de ton fichier shap_explainer.py
-                    results = apply_shap_image(
-                        model=classifier.model,
-                        image_path=image,
-                        transform=classifier.transform,
-                        classes=classifier.classes,
-                        device=classifier.device
-                    )
-                    st.image(results['visualization_overlay'], use_column_width=True)
+                    st.write("### XAI Metrics using SHAP ")
+                    with st.spinner("Calculating zones..."):
+                        classifier = get_lung_classifier(selected_model)
+                        shap_results = apply_shap_image(
+                            classifier.model, 
+                            image, 
+                            classifier.transform, 
+                            classifier.classes, 
+                            classifier.device
+                        )
+                        st.pyplot(shap_results['fig'])
+                        st.write(f"Confidence: {shap_results['confidence']*100:.2f}% for class {shap_results['predicted_class']}")
+        
     
     elif uploaded_file is None:
         if input_mode == "audio":
@@ -691,10 +669,8 @@ def comparison_page():
         available_xai = XAICompatibility.get_available_xai_methods(input_mode)
         available_models = XAICompatibility.get_available_models(input_mode)
         
-        # Sélection du modèle
         selected_model = st.selectbox("Select Model", available_models)
         
-        # Multi-select XAI methods
         selected_methods = st.multiselect(
             "Select XAI Methods to Compare",
             available_xai,
@@ -705,49 +681,61 @@ def comparison_page():
             st.warning("Please select at least 2 methods for comparison")
             return
         
-        # Display input
-        if input_mode == "audio":
-            st.audio(uploaded_file, format='audio/wav')
-            save_file(uploaded_file)
-            sound = uploaded_file.name
-        else:
-            image = load_and_preprocess_image(uploaded_file)
-            st.image(image, width=700)
-        
-        if st.button("🔍 Compare Methods", type="primary"):
-            st.subheader("📊 Comparison Results")
-            
-            cols = st.columns(len(selected_methods))
+        if st.button("🔍 Compare Methods"):
             
             if input_mode == "audio":
-                with st.spinner('Generating spectrogram...'):
-                    spec = create_spectrogram(sound)
-                    model = tf.saved_model.load('./saved_model/model')
-                    class_label, prediction = predictions(spec, model)
-                
-                for idx, method in enumerate(selected_methods):
-                    with cols[idx]:
-                        st.markdown(f"### {method}")
-                        with st.spinner(f"Generating {method}..."):
+                save_file(uploaded_file)
+                spec = create_spectrogram(uploaded_file.name)
+                model = load_audio_model_cached('./saved_model/model')
+                class_label, prediction = predictions(spec, model)
+                pred_name = audio_class_names[class_label]
+                original_display = spec
+            else:
+                image = load_and_preprocess_image(uploaded_file)
+                class_label, prediction = predictions_image(image, selected_model)
+                pred_name = image_class_names[class_label]
+                original_display = image
+
+            st.subheader(f"📊 Results for Prediction: {pred_name} ({float(np.max(prediction))*100:.2f}%)")
+            
+            cols = st.columns(len(selected_methods) + 1)
+            
+            # ---Original ---
+            with cols[0]:
+                st.markdown("### Original")
+                st.image(original_display, use_column_width=True)
+                if input_mode == "audio":
+                    st.audio(uploaded_file)
+
+            # --- Colonnes XAI ---
+            for idx, method in enumerate(selected_methods):
+                with cols[idx + 1]:
+                    st.markdown(f"### {method}")
+                    with st.spinner(f"Computing {method}..."):
+                        if input_mode == "audio":
                             if method == "LIME":
                                 fig = lime_predict_audio(spec, model)
                                 st.pyplot(fig)
                             elif method == "Grad-CAM":
                                 fig = grad_predict_audio(spec, model, prediction, class_label)
                                 st.pyplot(fig)
-            
-            else:  # image
-                for idx, method in enumerate(selected_methods):
-                    with cols[idx]:
-                        st.markdown(f"### {method}")
-                        with st.spinner(f"Generating {method}..."):
+                            elif method == "SHAP":
+                                fig = shap_predict_audio(spec, model)
+                                st.pyplot(fig)
+                        
+                        else: # Mode Image
                             if method == "LIME":
                                 fig = lime_predict_image(image, selected_model)
                                 st.pyplot(fig)
                             elif method == "Grad-CAM":
-                                class_label, prediction = predictions_image(image, selected_model)
                                 fig = grad_predict_image(image, selected_model, prediction, class_label)
                                 st.pyplot(fig)
-
+                            elif method == "SHAP":
+                                classifier = get_lung_classifier(selected_model)
+                                shap_results = apply_shap_image(
+                                    classifier.model, image, classifier.transform, 
+                                    classifier.classes, classifier.device
+                                )
+                                st.pyplot(shap_results['fig'])
 if __name__ == "__main__":
     main()

@@ -9,6 +9,8 @@ import shap
 from PIL import Image
 import matplotlib.pyplot as plt
 import cv2
+from matplotlib.colors import LinearSegmentedColormap
+from skimage.segmentation import slic
 
 class ImageSHAPExplainer:
     def __init__(self, model, transform, classes, device='cpu'):
@@ -28,180 +30,104 @@ class ImageSHAPExplainer:
         
         # Create background dataset (using small set of images)
         self.background = None
+
+    def _get_color_map(self):
+        """Defines the custom Red/Green colormap."""
+        colors = []
+        for l in np.linspace(1, 0, 100): colors.append((245/255, 39/255, 87/255, l)) # Rouge
+        for l in np.linspace(0, 1, 100): colors.append((24/255, 196/255, 93/255, l)) # Vert
+        return LinearSegmentedColormap.from_list("shap", colors)
     
-    def set_background(self, background_images):
-        """
-        Set background dataset for SHAP
-        Args:
-            background_images: List of background images (PIL Images or paths)
-        """
-        background_tensors = []
-        for img in background_images:
-            if isinstance(img, str):
-                img = Image.open(img).convert('RGB')
-            img_tensor = self.transform(img).unsqueeze(0)
-            background_tensors.append(img_tensor)
-        
-        self.background = torch.cat(background_tensors, dim=0).to(self.device)
+    def _fill_segmentation(self, values, segmentation):
+        """Fills the segments with the calculated SHAP values."""
+        out = np.zeros(segmentation.shape)
+        for i in range(len(values)):
+            out[segmentation == i] = values[i]
+        return out
     
-    def explain(self, image_path):
+    def explain(self, image_path, nsamples=100, n_segments=50):
         """
-        Generate SHAP explanation using GradientExplainer (plus stable)
+        Run KernelSHAP on the segmented image.
         """
         # Load and preprocess image
         if isinstance(image_path, str):
-            image = Image.open(image_path).convert('RGB')
+            img_pil = Image.open(image_path).convert('RGB')
         else:
-            image = image_path.convert('RGB')
+            img_pil = image_path.convert('RGB')
         
-        image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+        img_pil = img_pil.resize((224, 224))
+        img_array = np.array(img_pil).astype('float32') / 255.0
+
+        # Segmentation (Super-pixels)
+        segments_slic = slic(img_array, n_segments=n_segments, compactness=10, sigma=1)
         
-        # Create background if not set
-        if self.background is None:
-            self.background = torch.zeros_like(image_tensor).to(self.device)
-        
-        # Utiliser GradientExplainer (plus compatible)
-        explainer = shap.GradientExplainer(self.model, self.background)
-        
-        # Calculate SHAP values
-        shap_values = explainer.shap_values(image_tensor)
-        
-        # Get prediction
-        with torch.no_grad():
-            output = self.model(image_tensor)
-            probs = torch.nn.functional.softmax(output, dim=1)
-            pred_class = torch.argmax(probs, dim=1).item()
-            confidence = probs[0, pred_class].item()
+        # Function of prediction for KernelExplainer
+        def predict_fn(z):
+            mask_value = img_array.mean()
+            tensors = []
+            for i in range(z.shape[0]):
+                temp_img = img_array.copy()
+                for j in range(z.shape[1]):
+                    if z[i, j] == 0:
+                        temp_img[segments_slic == j] = mask_value
+                
+                temp_pil = Image.fromarray((temp_img * 255).astype(np.uint8))
+                tensors.append(self.transform(temp_pil))
+            
+            batch_tensor = torch.stack(tensors).to(self.device)
+            with torch.no_grad():
+                outputs = self.model(batch_tensor)
+                return torch.nn.functional.softmax(outputs, dim=1).cpu().numpy()
+
+        # Compute SHAP values
+        explainer = shap.KernelExplainer(predict_fn, np.zeros((1, n_segments)))
+        shap_values = explainer.shap_values(np.ones((1, n_segments)), nsamples=nsamples)
+
+        preds = predict_fn(np.ones((1, n_segments)))
+        top_pred_idx = np.argmax(preds[0])
         
         return {
             'shap_values': shap_values,
-            'image_tensor': image_tensor.cpu().numpy(),
-            'predicted_class': self.classes[pred_class],
-            'confidence': confidence,
-            'probabilities': {self.classes[i]: float(probs[0, i]) 
-                            for i in range(len(self.classes))}
+            'segments': segments_slic,
+            'img_array': img_array,
+            'predicted_class_idx': top_pred_idx,
+            'confidence': float(np.max(preds[0]))
         }
     
-    def visualize(self, shap_values, image_tensor, predicted_class_idx=1):
+    def visualize(self, result):
         """
-        Create SHAP visualization
-        Args:
-            shap_values: SHAP values array
-            image_tensor: Original image tensor
-            predicted_class_idx: Index of class to visualize
-        Returns:
-            Visualization as PIL Image
+        Generates the Matplotlib figure with the SHAP segments overlay.
         """
-        # Convert to proper format for visualization
-        # SHAP values shape: (num_classes, channels, height, width)
-        if isinstance(shap_values, list):
-            shap_values_class = shap_values[predicted_class_idx]
-        else:
-            shap_values_class = shap_values[predicted_class_idx]
+        img_array = result['img_array']
+        segments_slic = result['segments']
+        shap_values = result['shap_values']
+        pred_idx = result['predicted_class_idx']
         
-        # Average across color channels for visualization
-        shap_sum = np.sum(np.abs(shap_values_class), axis=0)
+        cm = self._get_color_map()    
+        m = self._fill_segmentation(shap_values[pred_idx][0], segments_slic)
         
-        # Normalize to [0, 1]
-        shap_sum = (shap_sum - shap_sum.min()) / (shap_sum.max() - shap_sum.min() + 1e-8)
+        fig, ax = plt.subplots(figsize=(8, 8))
+        max_val = np.max(np.abs(m))
         
-        # Create heatmap
-        plt.figure(figsize=(8, 8))
-        plt.imshow(shap_sum, cmap='hot', interpolation='nearest')
-        plt.colorbar(label='SHAP Value Magnitude')
-        plt.title(f'SHAP Explanation - Class: {predicted_class_idx}')
-        plt.axis('off')
+        ax.imshow(img_array)
+        im = ax.imshow(m, cmap=cm, vmin=-max_val, vmax=max_val, alpha=0.6)
+        ax.axis('off')
         
-        # Convert plot to image
-        plt.tight_layout()
-        plt.savefig('/tmp/shap_viz.png', bbox_inches='tight', dpi=150)
-        plt.close()
+        plt.colorbar(im, ax=ax, label="Importance SHAP")
         
-        result = Image.open('/tmp/shap_viz.png')
-        return result, shap_sum
+        return fig
     
-    
-    def visualize_overlay(self, image_path, shap_values, predicted_class_idx=1):
-        """
-        Crée une visualisation SHAP superposée avec correction du type de données pour OpenCV
-        """
-        # 1. Préparation de l'image originale
-        if isinstance(image_path, str):
-            original_image = Image.open(image_path).convert('RGB')
-        else:
-            original_image = image_path.convert('RGB')
-        
-        original_image = original_image.resize((224, 224))
-        original_array = np.array(original_image)
-        
-        # 2. Extraction et nettoyage des dimensions SHAP
-        if isinstance(shap_values, list):
-            shap_values_class = shap_values[predicted_class_idx]
-        else:
-            shap_values_class = shap_values[predicted_class_idx]
-
-        # Si SHAP renvoie (1, 3, 224, 224), on retire la dimension de batch
-        if len(shap_values_class.shape) == 4:
-            shap_values_class = shap_values_class[0]
-
-        # Conversion en numpy si c'est encore un tenseur PyTorch
-        if torch.is_tensor(shap_values_class):
-            shap_values_class = shap_values_class.detach().cpu().numpy()
-
-        # 3. Création de la heatmap 2D
-        # On somme les valeurs absolues des canaux (C, H, W) -> (H, W)
-        shap_sum = np.sum(np.abs(shap_values_class), axis=0)
-        
-        # Normalisation entre 0 et 1
-        shap_min, shap_max = shap_sum.min(), shap_sum.max()
-        shap_norm = (shap_sum - shap_min) / (shap_max - shap_min + 1e-8)
-
-        # On transforme les floats [0.0, 1.0] en entiers [0, 255] de type uint8
-        heatmap_8bit = np.uint8(255 * shap_norm)
-        
-        # Application de la ColorMap
-        heatmap_color = cv2.applyColorMap(heatmap_8bit, cv2.COLORMAP_JET)
-        heatmap_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-        
-        # 4. Superposition (Overlay)
-        superimposed = cv2.addWeighted(original_array, 0.6, heatmap_rgb, 0.4, 0)
-        
-        return Image.fromarray(superimposed)
-
-
-def apply_shap_image(model, image_path, transform, classes, device='cpu',
-                    background_images=None):
+def apply_shap_image(model, image_path, transform, classes, device='cpu'):
     """
-    Convenience function to apply SHAP to image
-    Args:
-        model: PyTorch model
-        image_path: Path to image or PIL Image
-        transform: Preprocessing transform
-        classes: List of class names
-        device: 'cpu' or 'cuda'
-        background_images: Optional background dataset
-    Returns:
-        SHAP explanation and visualizations
+    Fonction bridge for new_app.py
     """
     explainer = ImageSHAPExplainer(model, transform, classes, device)
-    
-    if background_images:
-        explainer.set_background(background_images)
-    
-    result = explainer.explain(image_path)
-    
-    # Get predicted class index
-    pred_class_idx = classes.index(result['predicted_class'])
-            
-    viz_overlay = explainer.visualize_overlay(
-        image_path,
-        result['shap_values'],
-        pred_class_idx
-    )
+    result = explainer.explain(image_path, nsamples=100)
+    fig = explainer.visualize(result)
     
     return {
-        'predicted_class': result['predicted_class'],
-        'confidence': result['confidence'],
-        'visualization_overlay': viz_overlay,
-        'shap_values': result['shap_values']
+        'fig': fig,
+        'predicted_class': classes[result['predicted_class_idx']],
+        'confidence': result['confidence']
     }
+
