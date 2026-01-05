@@ -1,6 +1,6 @@
 """
 Lung Cancer Detection - Image Classification Models
-Supports AlexNet and DenseNet with pre-trained weights
+Supports AlexNet, DenseNet with ImageNet weights, and TorchXRayVision medical models
 """
 
 import torch
@@ -10,30 +10,79 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 
+# Try importing TorchXRayVision for medical-specific models
+try:
+    import torchxrayvision as xrv
+    XRV_AVAILABLE = True
+except ImportError:
+    XRV_AVAILABLE = False
+    
 class LungCancerClassifier:
-    def __init__(self, model_name='densenet', device='cpu'):
+    def __init__(self, model_name='densenet', device='cpu', use_medical_weights=True):
         """
         Initialize lung cancer classifier
         Args:
-            model_name: 'alexnet' or 'densenet'
+            model_name: 'alexnet', 'densenet', or 'xrv-densenet' (medical-specific)
             device: 'cpu' or 'cuda'
+            use_medical_weights: If True and XRV available, use medical pretrained weights
         """
         self.device = device
         self.model_name = model_name
-        self.model = self._load_model(model_name)
+        self.use_medical = use_medical_weights and XRV_AVAILABLE and model_name in ['densenet', 'xrv-densenet']
+        
+        if self.use_medical:
+            self.model = self._load_xrv_model()
+        else:
+            if use_medical_weights and not XRV_AVAILABLE:
+               self.model = self._load_model(model_name)
+        
         self.model.to(self.device)
         self.model.eval()
         
         # Image preprocessing
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
+        if self.use_medical:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x * 2048.0 - 1024.0),  # Scale [0,1] to [-1024, 1024]
+            ])
+        else:
+            # ImageNet preprocessing
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225])
+            ])
         
         # Class labels (binary classification)
         self.classes = ['No Finding', 'Malignant']
+    
+    def _load_xrv_model(self):
+        """Load TorchXRayVision medical pretrained model"""
+        xrv_base = xrv.models.DenseNet(weights="densenet121-res224-all")
+        
+        # Create a wrapper that uses XRV features but outputs binary classification
+        class XRVBinaryWrapper(nn.Module):
+            def __init__(self, xrv_model):
+                super().__init__()
+                self.features = xrv_model.features
+                # Get feature dimension from the XRV model
+                num_features = xrv_model.classifier.in_features
+                # New binary classifier head
+                self.classifier = nn.Linear(num_features, 2)
+                
+            def forward(self, x):
+                features = self.features(x)
+                features = torch.nn.functional.relu(features, inplace=True)
+                features = torch.nn.functional.adaptive_avg_pool2d(features, (1, 1))
+                features = torch.flatten(features, 1)
+                out = self.classifier(features)
+                return out
+        
+        wrapped_model = XRVBinaryWrapper(xrv_base)
+        return wrapped_model
     
     def _load_model(self, model_name):
         """Load pre-trained model and adapt for binary classification"""
@@ -66,7 +115,15 @@ class LungCancerClassifier:
         else:
             image = image_path.convert('RGB')
         
-        image_tensor = self.transform(image).unsqueeze(0)
+        # Apply transforms
+        image_tensor = self.transform(image)
+        
+        # For XRV models, ensure single channel
+        if self.use_medical and image_tensor.shape[0] != 1:
+            # If RGB, convert to grayscale by averaging channels
+            image_tensor = image_tensor.mean(dim=0, keepdim=True)
+        
+        image_tensor = image_tensor.unsqueeze(0)
         return image_tensor.to(self.device)
     
     def predict(self, image_path):
@@ -120,7 +177,7 @@ class LungCancerClassifier:
             gradients.append(grad_output[0])
         
         # Register hooks based on model architecture
-        if self.model_name == 'densenet':
+        if self.use_medical or self.model_name == 'densenet' or self.model_name == 'xrv-densenet':
             target_layer = self.model.features[-1]
         else:  # alexnet
             target_layer = self.model.features[-1]
@@ -144,13 +201,14 @@ class LungCancerClassifier:
 
 
 # Utility function for model loading
-def load_lung_cancer_model(model_name='densenet', device='cpu'):
+def load_lung_cancer_model(model_name='densenet', device='cpu', use_medical_weights=True):
     """
     Convenience function to load model
     Args:
-        model_name: 'alexnet' or 'densenet'
+        model_name: 'alexnet', 'densenet', or 'xrv-densenet'
         device: 'cpu' or 'cuda'
+        use_medical_weights: Use TorchXRayVision medical weights if available
     Returns:
         Initialized classifier
     """
-    return LungCancerClassifier(model_name=model_name, device=device)
+    return LungCancerClassifier(model_name=model_name, device=device, use_medical_weights=use_medical_weights)

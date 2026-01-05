@@ -41,8 +41,14 @@ class ImageSHAPExplainer:
     def _fill_segmentation(self, values, segmentation):
         """Fills the segments with the calculated SHAP values."""
         out = np.zeros(segmentation.shape)
-        for i in range(len(values)):
-            out[segmentation == i] = values[i]
+        # Ensure values is 1D
+        values_flat = np.ravel(values)
+        num_segments = len(np.unique(segmentation))
+        # Only iterate through the segments that exist and have corresponding values
+        for i in range(min(len(values_flat), num_segments)):
+            mask = segmentation == i
+            if np.any(mask):  # Only assign if mask has True values
+                out[mask] = values_flat[i]
         return out
     
     def explain(self, image_path, nsamples=100, n_segments=50):
@@ -103,8 +109,22 @@ class ImageSHAPExplainer:
         shap_values = result['shap_values']
         pred_idx = result['predicted_class_idx']
         
-        cm = self._get_color_map()    
-        m = self._fill_segmentation(shap_values[pred_idx][0], segments_slic)
+        cm = self._get_color_map()
+        # Handle both binary and multi-class classification
+        if isinstance(shap_values, list) and len(shap_values) > pred_idx:
+            # Multi-class: list of arrays, one per class
+            shap_vals = shap_values[pred_idx][0]
+        elif isinstance(shap_values, list) and len(shap_values) == 1:
+            # Edge case: list with single array
+            shap_vals = shap_values[0][0] if shap_values[0].ndim > 1 else shap_values[0]
+        elif isinstance(shap_values, np.ndarray):
+            # Binary classification or single array
+            shap_vals = shap_values[0] if shap_values.ndim > 1 else shap_values
+        else:
+            # Fallback: flatten whatever we have
+            shap_vals = np.ravel(shap_values)
+            
+        m = self._fill_segmentation(shap_vals, segments_slic)
         
         fig, ax = plt.subplots(figsize=(8, 8))
         max_val = np.max(np.abs(m))

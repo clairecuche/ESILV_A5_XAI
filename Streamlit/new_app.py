@@ -27,13 +27,17 @@ import uuid
 from pathlib import Path
 
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+
 import numpy as np
+# Handle deprecated NumPy types for older libraries
 if not hasattr(np, 'int'):
-    np.int = int
+    np.int = np.int_
 if not hasattr(np, 'float'):
-    np.float = float
+    np.float = np.float64
 if not hasattr(np, 'bool'):
-    np.bool = bool
+    np.bool = np.bool_
 
 # Ensure project Code/ modules are importable when running from Streamlit folder
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -85,7 +89,12 @@ class XAICompatibility:
             return ["SavedModel (Audio)"]
             #return ["MobileNet (Audio)", "VGG16 (Audio)", "Custom CNN"]
         elif input_type == "image":
-            return ["DenseNet121", "AlexNet"]
+            # Check if TorchXRayVision is available
+            try:
+                import torchxrayvision
+                return ["DenseNet121 (Medical)", "DenseNet121 (ImageNet)", "AlexNet (ImageNet)"]
+            except ImportError:
+                return ["DenseNet121 (ImageNet)", "AlexNet (ImageNet)"]
         return []
     
 # ============================================
@@ -95,10 +104,27 @@ class XAICompatibility:
 @st.cache(allow_output_mutation=True)
 def get_lung_classifier(model_name):
     """Load the PyTorch model once and keep it in memory"""
-    model_key = model_name.lower().replace("121", "").replace(" ", "")
+    # Parse model name to determine architecture and weights
+    model_name_lower = model_name.lower()
+    
+    if "medical" in model_name_lower:
+        # Use medical weights with TorchXRayVision
+        model_key = "densenet"
+        use_medical = True
+    elif "densenet" in model_name_lower:
+        model_key = "densenet"
+        use_medical = False
+    elif "alexnet" in model_name_lower:
+        model_key = "alexnet"
+        use_medical = False
+    else:
+        # Default
+        model_key = "densenet"
+        use_medical = True
+    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    classifier = LungCancerClassifier(model_name=model_key, device=device)
-    classifier.model.eval() # Fixe les couches de Dropout/BatchNormalization
+    classifier = LungCancerClassifier(model_name=model_key, device=device, use_medical_weights=use_medical)
+    classifier.model.eval()  # Fix Dropout/BatchNormalization layers
     return classifier
 
 @st.cache(allow_output_mutation=True)
@@ -300,8 +326,14 @@ def shap_predict_audio(image_data, model):
 
     def fill_segmentation(values, segmentation):
         out = np.zeros(segmentation.shape)
-        for i in range(len(values)):
-            out[segmentation == i] = values[i]
+        # Ensure values is 1D
+        values_flat = np.ravel(values)
+        num_segments = len(np.unique(segmentation))
+        # Only iterate through the segments that exist and have corresponding values
+        for i in range(min(len(values_flat), num_segments)):
+            mask = segmentation == i
+            if np.any(mask):  # Only assign if mask has True values
+                out[mask] = values_flat[i]
         return out
 
     # We retrieve the predicted class
@@ -309,7 +341,14 @@ def shap_predict_audio(image_data, model):
     top_pred_idx = np.argmax(preds[0])
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    m = fill_segmentation(shap_values[top_pred_idx][0], segments_slic)
+    # Handle both binary and multi-class classification
+    if isinstance(shap_values, list):
+        shap_vals = shap_values[top_pred_idx][0]
+    else:
+        # Binary classification returns single array
+        shap_vals = shap_values[0]
+    
+    m = fill_segmentation(shap_vals, segments_slic)
     max_val = np.max(np.abs(m))
     ax.imshow(img_array, alpha=0.3) # Original image in background
     im = ax.imshow(m, cmap=cm, vmin=-max_val, vmax=max_val)

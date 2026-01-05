@@ -1,6 +1,6 @@
 tensorflow==2.13.0
 keras==2.13.1
-numpy==1.24.3
+numpy<2.0.0
 scipy==1.10.1
 
 librosa==0.10.1
@@ -16,7 +16,8 @@ scikit-image==0.21.0
 lime==0.2.0.1
 torch>=2.1.0
 torchvision>=0.16.0
-shap==0.41.0
+torchxrayvision>=1.2.0
+shap>=0.44.0
 grad-cam>=1.4.0
 
 scikit-learn==1.2.2
