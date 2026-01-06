@@ -612,19 +612,25 @@ def classification_page():
                     st.write('### XAI Metrics using LIME')
                     with st.spinner('Generating LIME...'):
                         fig2 = lime_predict_audio(spec, model)
-                        st.pyplot(fig2)
+                        col1, col2 = st.columns([1, 1]) 
+                        with col1:
+                            st.pyplot(fig2)
                 
                 elif selected_xai == 'Grad-CAM':
                     st.write('### XAI Metrics using Grad-CAM')
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict_audio(spec, model, prediction, class_label)
-                        st.pyplot(grad_img)
+                        col1, col2 = st.columns([1, 1]) 
+                        with col1:
+                            st.pyplot(grad_img)
                 
                 elif selected_xai == "SHAP":
                     st.write("### SHAP Analysis (Segmentation)")
                     with st.spinner("Calculating zones..."):
                         fig = shap_predict_audio(spec, model)
-                        st.pyplot(fig)
+                        col1, col2 = st.columns([1, 1]) 
+                        with col1:
+                            st.pyplot(fig)
 
     
         # ==================== IMAGE PROCESSING ====================
@@ -649,13 +655,17 @@ def classification_page():
                     st.write('### XAI Metrics using LIME')
                     with st.spinner('Generating LIME explanation...'):
                         fig2 = lime_predict_image(image, selected_model)
-                        st.pyplot(fig2)
+                        col1, col2 = st.columns([1, 1]) 
+                        with col1:
+                            st.pyplot(fig2)
                 
                 elif selected_xai == 'Grad-CAM':
                     st.write('### XAI Metrics using Grad-CAM')
                     with st.spinner('Generating Grad-CAM...'):
                         grad_img = grad_predict_image(image, selected_model, prediction, class_label)
-                        st.pyplot(grad_img)
+                        col1, col2 = st.columns([1, 1]) 
+                        with col1:
+                            st.pyplot(grad_img)
                 
                 elif selected_xai == "SHAP":
                     st.write("### XAI Metrics using SHAP ")
