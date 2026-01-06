@@ -33,8 +33,7 @@ class LungCancerClassifier:
         if self.use_medical:
             self.model = self._load_xrv_model()
         else:
-            if use_medical_weights and not XRV_AVAILABLE:
-               self.model = self._load_model(model_name)
+            self.model = self._load_model(model_name)
         
         self.model.to(self.device)
         self.model.eval()
